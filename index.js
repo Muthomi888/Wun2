@@ -6,14 +6,14 @@ const WebSocket = require('ws');
 // ===========================================================
 const CONFIG = {
   API_TOKEN: '8lv1K0qHh9meeLC',          // ← paste your token here
-  BASE_STAKE: 2.5,
+  BASE_STAKE: 4.5,
   STOP_LOSS: 130000,
   TAKE_PROFIT: 100000,
   DURATION: 898,                               // contract duration in seconds
   MARKET: 'R_10',                              // R_10 | R_25 | R_50 | R_75 | R_100
   MODE: 'ST_AUTO',                              // 'ST_AUTO' | 'CALL' | 'PUT'
   ST_PERIOD: 1,
-  ST_MULTIPLIER: 2.0,
+  ST_MULTIPLIER: 1.0,
   APP_ID: 1089,
 };
 
