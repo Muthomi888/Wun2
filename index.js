@@ -6,7 +6,7 @@ const WebSocket = require('ws');
 // ===========================================================
 const CONFIG = {
   API_TOKEN: 'XI3UEVkzS7NbtRH',          // ← paste your token here
-  BASE_STAKE: 1.5,
+  BASE_STAKE: 4.5,
   STOP_LOSS: 130000,
   TAKE_PROFIT: 100000,
   DURATION: 298,                               // contract duration in seconds
