@@ -5,16 +5,15 @@ const WebSocket = require('ws');
 // CONFIG — edit these before deploying
 // ===========================================================
 const CONFIG = {
-  API_TOKEN: 'XI3UEVkzS7NbtRH',          // ← paste your token here
-  BASE_STAKE: 4.5,
-  STOP_LOSS: 130000,
-  TAKE_PROFIT: 100000,
-  DURATION: 118,                               // contract duration in seconds
-  MARKET: 'R_10',                              // R_10 | R_25 | R_50 | R_75 | R_100
-  MODE: 'ST_AUTO',                              // 'ST_AUTO' | 'CALL' | 'PUT'
-  ST_PERIOD: 1,
-  ST_MULTIPLIER: 1.0,
-  APP_ID: 1089,
+  API_TOKEN:    'XI3UEVkzS7NbtRH',  // ← paste your token here
+  BASE_STAKE:   4.5,
+  STOP_LOSS:    130000,
+  TAKE_PROFIT:  100000,
+  DURATION:     118,                 // contract duration in seconds
+  MARKET:       'R_10',             // R_10 | R_25 | R_50 | R_75 | R_100
+  MODE:         'HMA_AUTO',         // 'HMA_AUTO' | 'CALL' | 'PUT'
+  HMA_PERIOD:   20,                 // Hull MA period (applied to 10-min candles)
+  APP_ID:       1089,
 };
 
 // ===========================================================
@@ -32,31 +31,27 @@ let isAuthorized = false;
 let autoTrading = true;
 let isTrading = false;
 let activeContractId = null;
-let contractExpiry = null;                     // timestamp (seconds) when the current contract expires
-let currentStrategy = null;                    // 'CALL' | 'PUT'
+let contractExpiry = null;      // epoch seconds when current contract expires
+let currentStrategy = null;    // 'CALL' | 'PUT'
 let lossStreak = 0;
-let maxLossStreak = 0;                          // highest consecutive losses seen
+let maxLossStreak = 0;
 let totalProfit = 0;
 let lastStake = 0;
 let lossStreakStakes = 0;
 let activeTradeTimeout = null;
-let tradeOpenedAt = null;                       // timestamp when last trade was placed
+let tradeOpenedAt = null;
 
-// SuperTrend — 2-min candles (execution reference only)
-let stCandles = [];
-let stCurrentCandle = null;
-let stLastDirection = 0;
-let stLastValue = null;
+// HMA — 10-min candles (signal source)
+let hmaCandles = [];           // closed 10-min candles
+let hmaCurrentCandle = null;  // live forming candle
+let hmaLastValue = null;      // most recent HMA line value
+let hmaLastSignal = null;     // 'CALL' | 'PUT' — direction locked at :56
 
-// SuperTrend — 3-min candles (signal source)
-let st2Candles = [];
-let st2CurrentCandle = null;
-let st2LastDirection = 0;
-let st2LastValue = null;
-let st2LastSignal = null;                        // 'CALL' | 'PUT' — drives trade direction
+// 5-min candles (execution reference only — confirms boundary)
+let execCandles = [];
+let execCurrentCandle = null;
 
-// Aliases for the :56/:58 handlers (always use 2-min signal)
-let stLastSignal = null;                         // kept for backward compat — mirrors st2LastSignal
+// Second-checker state
 let stSecondChecker = null;
 let st56Fired = false;
 let st58Fired = false;
@@ -68,92 +63,74 @@ const PING_INTERVAL = 10000;
 // ===========================================================
 function log(message, type = 'info') {
   const ts = new Date().toISOString();
-  const icons = { info:'ℹ️ ', success:'✅', warning:'⚠️ ', error:'❌', win:'🤑', loss:'☠️ ' };
+  const icons = { info: 'ℹ️ ', success: '✅', warning: '⚠️ ', error: '❌', win: '🤑', loss: '☠️ ' };
   console.log(`[${ts}] ${icons[type] || 'ℹ️ '} ${message}`);
 }
 
 // ===========================================================
-// SUPERTREND ENGINE (ported 1-to-1 from the HTML bot)
+// HULL MOVING AVERAGE ENGINE
 // ===========================================================
-function computeSuperTrend(candles, period, multiplier) {
-  const n = candles.length;
-  if (n < period + 2) return null;
-  const trs = [];
-  for (let i = 1; i < n; i++) {
-    const c = candles[i], p = candles[i - 1];
-    trs.push(Math.max(
-      c.high - c.low,
-      Math.abs(c.high - p.close),
-      Math.abs(c.low - p.close)
-    ));
+
+/**
+ * Weighted Moving Average over the last `period` values of `arr`.
+ */
+function wma(arr, period) {
+  if (arr.length < period) return null;
+  const slice = arr.slice(-period);
+  let num = 0, denom = 0;
+  for (let i = 0; i < period; i++) {
+    const w = i + 1;
+    num += slice[i] * w;
+    denom += w;
   }
-  const atrs = new Array(trs.length).fill(0);
-  let seed = 0;
-  for (let i = 0; i < period; i++) seed += trs[i];
-  atrs[period - 1] = seed / period;
-  for (let i = period; i < trs.length; i++) {
-    atrs[i] = (atrs[i - 1] * (period - 1) + trs[i]) / period;
-  }
-  const upperBands = [], lowerBands = [], dirs = [];
-  for (let i = period - 1; i < trs.length; i++) {
-    const ci = i + 1;
-    const c = candles[ci];
-    const hl2 = (c.high + c.low) / 2;
-    const atr = atrs[i];
-    const rawUp = hl2 + multiplier * atr;
-    const rawDn = hl2 - multiplier * atr;
-    let finalUp, finalDn, dir;
-    if (upperBands.length === 0) {
-      finalUp = rawUp;
-      finalDn = rawDn;
-      dir = c.close > rawDn ? 1 : -1;
-    } else {
-      const pUp = upperBands[upperBands.length - 1];
-      const pDn = lowerBands[lowerBands.length - 1];
-      const pDir = dirs[dirs.length - 1];
-      const pClose = candles[ci - 1].close;
-      finalUp = (rawUp < pUp || pClose > pUp) ? rawUp : pUp;
-      finalDn = (rawDn > pDn || pClose < pDn) ? rawDn : pDn;
-      if (pDir === -1) {
-        dir = c.close > finalUp ? 1 : -1;
-      } else {
-        dir = c.close < finalDn ? -1 : 1;
-      }
-    }
-    upperBands.push(finalUp);
-    lowerBands.push(finalDn);
-    dirs.push(dir);
-  }
-  if (!dirs.length) return null;
-  const lastDir = dirs[dirs.length - 1];
-  const lastUp = upperBands[upperBands.length - 1];
-  const lastDn = lowerBands[lowerBands.length - 1];
-  return {
-    direction: lastDir,
-    value: lastDir === 1 ? lastDn : lastUp,
-    upper: lastUp,
-    lower: lastDn
-  };
+  return num / denom;
 }
 
-function refreshSuperTrend() {
-  if (!stCandles.length) return;
-  const all = stCurrentCandle ? [...stCandles, stCurrentCandle] : [...stCandles];
-  const result = computeSuperTrend(all, CONFIG.ST_PERIOD, CONFIG.ST_MULTIPLIER);
-  if (!result) return;
-  stLastDirection = result.direction;
-  stLastValue = result.value;
+/**
+ * Hull Moving Average:
+ *   HMA(n) = WMA( 2·WMA(n/2) − WMA(n),  floor(√n) )
+ *
+ * Requires at least  n + floor(√n) − 1  data points.
+ */
+function computeHMA(closes, period) {
+  const halfP  = Math.floor(period / 2);
+  const sqrtP  = Math.floor(Math.sqrt(period));
+  const needed = period + sqrtP - 1;
+  if (closes.length < needed) return null;
+
+  // Build the intermediate diff series for the last sqrtP positions
+  const diff = [];
+  for (let offset = sqrtP - 1; offset >= 0; offset--) {
+    const end   = closes.length - offset;
+    const slice = closes.slice(0, end);
+    const wHalf = wma(slice, halfP);
+    const wFull = wma(slice, period);
+    if (wHalf == null || wFull == null) return null;
+    diff.push(2 * wHalf - wFull);
+  }
+
+  return wma(diff, sqrtP);
 }
 
-function refreshSuperTrend2min() {
-  if (!st2Candles.length) return;
-  const all = st2CurrentCandle ? [...st2Candles, st2CurrentCandle] : [...st2Candles];
-  const result = computeSuperTrend(all, CONFIG.ST_PERIOD, CONFIG.ST_MULTIPLIER);
-  if (!result) return;
-  st2LastDirection = result.direction;
-  st2LastValue = result.value;
-  st2LastSignal = result.direction === 1 ? 'CALL' : 'PUT';
-  stLastSignal = st2LastSignal;                  // keep alias in sync
+/**
+ * Rebuild HMA from the current 10-min candle array.
+ * Updates hmaLastValue and hmaLastSignal.
+ */
+function refreshHMA() {
+  if (!hmaCandles.length) return;
+
+  // Include the live forming candle's close so the value is always up-to-date
+  const all    = hmaCurrentCandle
+    ? [...hmaCandles, hmaCurrentCandle]
+    : [...hmaCandles];
+
+  const closes = all.map(c => c.close);
+  const hma    = computeHMA(closes, CONFIG.HMA_PERIOD);
+  if (hma == null) return;
+
+  const latestClose = closes[closes.length - 1];
+  hmaLastValue  = hma;
+  hmaLastSignal = latestClose > hma ? 'CALL' : 'PUT';
 }
 
 // ===========================================================
@@ -164,22 +141,22 @@ const STUCK_TIMEOUT_MS = (CONFIG.DURATION + 30) * 1000;
 function checkStuckState() {
   const nowSec = Date.now() / 1000;
 
-  // Case 1: trade initiated but never confirmed (activeContractId null)
+  // Trade initiated but never confirmed
   if (isTrading && tradeOpenedAt && (Date.now() - tradeOpenedAt > STUCK_TIMEOUT_MS)) {
-    log(`Watchdog: trade open for >${CONFIG.DURATION + 30}s without confirmation — force-resetting`, 'warning');
-    isTrading = false;
+    log(`Watchdog: trade open >${CONFIG.DURATION + 30}s without confirmation — force-resetting`, 'warning');
+    isTrading        = false;
     activeContractId = null;
-    tradeOpenedAt = null;
-    contractExpiry = null;
+    tradeOpenedAt    = null;
+    contractExpiry   = null;
   }
 
-  // Case 2: contract is active but should have expired already
+  // Contract should already have expired
   if (activeContractId && contractExpiry && nowSec > contractExpiry + 30) {
     log(`Watchdog: contract ${activeContractId} expired +30s ago — clearing stale state`, 'warning');
     activeContractId = null;
-    isTrading = false;
-    tradeOpenedAt = null;
-    contractExpiry = null;
+    isTrading        = false;
+    tradeOpenedAt    = null;
+    contractExpiry   = null;
     if (activeTradeTimeout) {
       clearTimeout(activeTradeTimeout);
       activeTradeTimeout = null;
@@ -188,7 +165,14 @@ function checkStuckState() {
 }
 
 // ===========================================================
-// SECOND WATCHER — :56 locks signal, :58 fires trade (strictly)
+// SECOND WATCHER
+//   :56 of a 10-min closing minute → snapshot HMA, lock signal
+//   :58 of any 5-min  closing minute → fire trade
+//
+//   10-min candles close at the end of minutes: 9, 19, 29, 39, 49, 59
+//     → min % 10 === 9
+//   5-min  candles close at the end of minutes: 4, 9, 14, 19, 24 …
+//     → min % 5  === 4
 // ===========================================================
 function startSecondChecker() {
   if (stSecondChecker) {
@@ -199,13 +183,15 @@ function startSecondChecker() {
     const now = new Date();
     const min = now.getMinutes();
     const sec = now.getSeconds();
-    const onCycleMark = (min % 2 === 1); // minutes 1, 3, 5, 7…
+
+    const on10MinClose = (min % 10 === 9);  // closing minute of 10-min candle
+    const on5MinClose  = (min % 5  === 4);  // closing minute of 5-min candle
 
     // Run watchdog every poll
     checkStuckState();
 
-    // ── :56 — snapshot candle close, lock direction ───────────
-    if (onCycleMark && sec === 56) {
+    // ── :56 on a 10-min boundary — snapshot & lock HMA direction ──
+    if (on10MinClose && sec === 56) {
       if (!st56Fired) {
         st56Fired = true;
         onCandleCloseAt56();
@@ -214,13 +200,13 @@ function startSecondChecker() {
       st56Fired = false;
     }
 
-    // ── :58 — fire trade (strictly at 58, never at 59) ────────
-    if (onCycleMark && sec === 58) {
+    // ── :58 on any 5-min boundary — fire trade ────────────────────
+    if (on5MinClose && sec === 58) {
       if (!st58Fired) {
         st58Fired = true;
-        onTradeFireAt58(sec);
+        onTradeFireAt58();
       }
-    } else if (!onCycleMark || sec < 56) {
+    } else if (!on5MinClose || sec < 56) {
       st58Fired = false;
     }
   }, 500);
@@ -228,39 +214,46 @@ function startSecondChecker() {
 }
 
 // ===========================================================
-// :56 HANDLER
+// :56 HANDLER — snapshot 10-min candle close, lock HMA signal
 // ===========================================================
 function onCandleCloseAt56() {
-  refreshSuperTrend2min();
-  if (!st2LastSignal) return;
-  const label = st2LastSignal === 'CALL' ? '▲ RISE' : '▼ FALL';
-  log(`🔒 :56 locked → ${label} | 3m ST Line: ${st2LastValue != null ? st2LastValue.toFixed(4) : '—'}`, 'info');
-  // Pre-set direction ready for :58
-  if (CONFIG.MODE === 'ST_AUTO' && autoTrading && !isTrading && !activeContractId) {
-    currentStrategy = st2LastSignal;
+  refreshHMA();
+  if (!hmaLastSignal) {
+    log('⚠️  :56 — HMA not ready (need more candles)', 'warning');
+    return;
+  }
+  const label = hmaLastSignal === 'CALL' ? '▲ RISE' : '▼ FALL';
+  log(`🔒 :56 locked → ${label} | HMA: ${hmaLastValue != null ? hmaLastValue.toFixed(4) : '—'} | Close: ${hmaCurrentCandle ? hmaCurrentCandle.close.toFixed(4) : '—'}`, 'info');
+
+  // Pre-arm direction ready for the next :58
+  if (CONFIG.MODE === 'HMA_AUTO' && autoTrading && !isTrading && !activeContractId) {
+    currentStrategy = hmaLastSignal;
   }
 }
 
 // ===========================================================
-// :58 HANDLER — place the trade
+// :58 HANDLER — place the trade on a 5-min boundary
 // ===========================================================
-function onTradeFireAt58(sec) {
+function onTradeFireAt58() {
   if (!autoTrading) return;
   if (isTrading || activeContractId !== null) {
     log('⏭ :58 — already in a trade, waiting for next cycle', 'warning');
     return;
   }
-  if (CONFIG.MODE === 'ST_AUTO') {
-    if (!st2LastSignal) {
-      log('⚡ ST Auto: no 3-min signal locked this cycle — skipping', 'warning');
+
+  if (CONFIG.MODE === 'HMA_AUTO') {
+    if (!hmaLastSignal) {
+      log('⚡ HMA Auto: no signal locked yet — skipping', 'warning');
       return;
     }
-    currentStrategy = st2LastSignal;
+    // Always use the most recent HMA signal (refreshed every 10-min close)
+    currentStrategy = hmaLastSignal;
   } else {
     currentStrategy = CONFIG.MODE;
   }
+
   const dir = currentStrategy === 'CALL' ? 'RISE ▲' : 'FALL ▼';
-  log(`⚡ :58 firing → ${dir}`, 'info');
+  log(`⚡ :58 firing → ${dir} | HMA: ${hmaLastValue != null ? hmaLastValue.toFixed(4) : '—'}`, 'info');
   placeTrade(currentStrategy);
 }
 
@@ -299,8 +292,8 @@ function placeTrade(contractType) {
     return;
   }
   const stake = calculateNextStake();
-  lastStake = stake;
-  isTrading = true;
+  lastStake    = stake;
+  isTrading    = true;
   tradeOpenedAt = Date.now();
   log(`Placing ${contractType === 'CALL' ? 'RISE' : 'FALL'} | ${CONFIG.MARKET} | $${stake} | ${CONFIG.DURATION}s`, 'info');
   try {
@@ -308,34 +301,34 @@ function placeTrade(contractType) {
       buy: 1,
       price: stake,
       parameters: {
-        amount: stake,
-        basis: 'stake',
+        amount:        stake,
+        basis:         'stake',
         contract_type: contractType,
-        currency: 'USD',
-        duration: CONFIG.DURATION,
+        currency:      'USD',
+        duration:      CONFIG.DURATION,
         duration_unit: 's',
-        symbol: CONFIG.MARKET
+        symbol:        CONFIG.MARKET
       },
       passthrough: { priority: 'high', strategy: contractType },
       subscribe: 1
     }));
   } catch (e) {
     log(`Send error: ${e.message}`, 'error');
-    isTrading = false;
+    isTrading    = false;
     tradeOpenedAt = null;
   }
 }
 
 function stopBot() {
-  autoTrading = false;
-  isTrading = false;
+  autoTrading      = false;
+  isTrading        = false;
   activeContractId = null;
-  tradeOpenedAt = null;
-  contractExpiry = null;
-  currentStrategy = null;
-  lossStreak = 0;
-  lossStreakStakes = 0;
-  // maxLossStreak is intentionally NOT reset to preserve lifetime maximum
+  tradeOpenedAt    = null;
+  contractExpiry   = null;
+  currentStrategy  = null;
+  lossStreak       = 0;
+  lossStreakStakes  = 0;
+  // maxLossStreak intentionally NOT reset — preserves lifetime maximum
   log('Bot stopped', 'info');
 }
 
@@ -382,64 +375,65 @@ function subscribeToCandles() {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   ws.send(JSON.stringify({ forget_all: 'candles' }));
 
-  // Reset 2-min execution state
-  stCandles = [];
-  stCurrentCandle = null;
-  stLastDirection = 0;
-  stLastValue = null;
+  // Reset 10-min HMA state
+  hmaCandles       = [];
+  hmaCurrentCandle = null;
+  hmaLastValue     = null;
+  hmaLastSignal    = null;
 
-  // Reset 3-min signal state
-  st2Candles = [];
-  st2CurrentCandle = null;
-  st2LastDirection = 0;
-  st2LastValue = null;
-  st2LastSignal = null;
-  stLastSignal = null;
+  // Reset 5-min execution state
+  execCandles       = [];
+  execCurrentCandle = null;
 
-  // Subscribe to 2-min candles (trade execution reference)
+  // Subscribe to 10-min candles — HMA signal source
+  // Need at least HMA_PERIOD + floor(sqrt(HMA_PERIOD)) candles
+  const hmaCount = CONFIG.HMA_PERIOD + Math.floor(Math.sqrt(CONFIG.HMA_PERIOD)) + 10;
   ws.send(JSON.stringify({
     ticks_history: CONFIG.MARKET,
-    granularity: 120,
-    style: 'candles',
-    count: 150,
-    end: 'latest',
-    subscribe: 1
+    granularity:   600,            // 10 minutes
+    style:         'candles',
+    count:         Math.max(hmaCount, 50),
+    end:           'latest',
+    subscribe:     1
   }));
 
-  // Subscribe to 3-min candles (signal source — closest to 4-min Deriv supports)
+  // Subscribe to 5-min candles — execution boundary reference
   ws.send(JSON.stringify({
     ticks_history: CONFIG.MARKET,
-    granularity: 180,
-    style: 'candles',
-    count: 150,
-    end: 'latest',
-    subscribe: 1
+    granularity:   300,            // 5 minutes
+    style:         'candles',
+    count:         50,
+    end:           'latest',
+    subscribe:     1
   }));
 
-  log(`Subscribed to ${CONFIG.MARKET} 2-min candles (execution) + 3-min candles (signal)`, 'info');
+  log(`Subscribed to ${CONFIG.MARKET} 10-min candles (HMA signal) + 5-min candles (execution)`, 'info');
 }
 
+// ===========================================================
+// CANDLE HISTORY LOADER
+// ===========================================================
 function handleCandleHistory(arr, granularity) {
   if (!arr || !arr.length) return;
   const parsed = arr.map(c => ({
-    open: parseFloat(c.open),
-    high: parseFloat(c.high),
-    low: parseFloat(c.low),
+    open:  parseFloat(c.open),
+    high:  parseFloat(c.high),
+    low:   parseFloat(c.low),
     close: parseFloat(c.close),
     epoch: parseInt(c.epoch)
   }));
-  if (granularity === 180) {
-    // 3-min candles — signal source
-    st2CurrentCandle = parsed[parsed.length - 1];
-    st2Candles = parsed.slice(0, -1);
-    refreshSuperTrend2min();
-    log(`Loaded ${st2Candles.length} closed 3-min candles | 3m ST: ${st2LastSignal ?? 'pending'}`, 'success');
+
+  if (granularity === 600) {
+    // 10-min candles — HMA signal source
+    hmaCurrentCandle = parsed[parsed.length - 1];
+    hmaCandles       = parsed.slice(0, -1);
+    refreshHMA();
+    log(`Loaded ${hmaCandles.length} closed 10-min candles | HMA: ${hmaLastValue != null ? hmaLastValue.toFixed(4) : 'pending'} | Signal: ${hmaLastSignal ?? 'pending'}`, 'success');
   } else {
-    // 2-min candles — execution reference
-    stCurrentCandle = parsed[parsed.length - 1];
-    stCandles = parsed.slice(0, -1);
-    refreshSuperTrend();
-    log(`Loaded ${stCandles.length} closed 2-min candles`, 'success');
+    // 5-min candles — execution reference
+    execCurrentCandle = parsed[parsed.length - 1];
+    execCandles       = parsed.slice(0, -1);
+    log(`Loaded ${execCandles.length} closed 5-min candles`, 'success');
   }
 }
 
@@ -447,30 +441,33 @@ function handleCandleHistory(arr, granularity) {
 // WEBSOCKET MESSAGE HANDLER
 // ===========================================================
 function handleWsMessage(data) {
+  // Bulk candle history
   if (data.candles && Array.isArray(data.candles)) {
-    const gran = data.echo_req?.granularity ?? 120;
+    const gran = data.echo_req?.granularity ?? 300;
     handleCandleHistory(data.candles, gran);
     return;
   }
   if (data.history?.candles) {
-    const gran = data.echo_req?.granularity ?? 120;
+    const gran = data.echo_req?.granularity ?? 300;
     handleCandleHistory(data.history.candles, gran);
     return;
   }
+
   switch (data.msg_type) {
     case 'pong':
       break;
+
     case 'authorize':
       if (data.authorize) {
         isAuthorized = true;
         log(`Authorized | ${data.authorize.loginid} | Balance: ${data.authorize.balance} ${data.authorize.currency}`, 'success');
         subscribeToCandles();
         startSecondChecker();
-        if (CONFIG.MODE !== 'ST_AUTO') {
+        if (CONFIG.MODE !== 'HMA_AUTO') {
           currentStrategy = CONFIG.MODE;
           log(`Fixed direction: always ${CONFIG.MODE === 'CALL' ? 'RISE' : 'FALL'}`, 'info');
         } else {
-          log('ST Auto active — 3-min signal locks at :56, fires at :58 on 2-min boundary', 'info');
+          log('HMA Auto active — 10-min close locks signal at :56, fires at :58 on every 5-min boundary', 'info');
         }
         if (activeContractId) {
           subscribeToContractUpdates(activeContractId);
@@ -480,53 +477,51 @@ function handleWsMessage(data) {
         log(`Auth failed: ${JSON.stringify(data.error)}`, 'error');
       }
       break;
+
     case 'ohlc':
       if (data.ohlc) {
-        const o = data.ohlc;
-        const gran = parseInt(o.granularity ?? 120);
+        const o        = data.ohlc;
+        const gran     = parseInt(o.granularity ?? 300);
         const newEpoch = parseInt(o.open_time || o.epoch);
-        if (gran === 180) {
-          // 3-min live candle update
-          if (st2CurrentCandle && st2CurrentCandle.epoch !== newEpoch) {
-            st2Candles.push({ ...st2CurrentCandle });
-            if (st2Candles.length > 300) st2Candles.shift();
+        const candle   = {
+          open:  parseFloat(o.open),
+          high:  parseFloat(o.high),
+          low:   parseFloat(o.low),
+          close: parseFloat(o.close),
+          epoch: newEpoch
+        };
+
+        if (gran === 600) {
+          // 10-min live candle update
+          if (hmaCurrentCandle && hmaCurrentCandle.epoch !== newEpoch) {
+            hmaCandles.push({ ...hmaCurrentCandle });
+            if (hmaCandles.length > 300) hmaCandles.shift();
           }
-          st2CurrentCandle = {
-            open: parseFloat(o.open),
-            high: parseFloat(o.high),
-            low: parseFloat(o.low),
-            close: parseFloat(o.close),
-            epoch: newEpoch
-          };
-          refreshSuperTrend2min();
+          hmaCurrentCandle = candle;
+          refreshHMA();
         } else {
-          // 2-min live candle update
-          if (stCurrentCandle && stCurrentCandle.epoch !== newEpoch) {
-            stCandles.push({ ...stCurrentCandle });
-            if (stCandles.length > 300) stCandles.shift();
+          // 5-min live candle update
+          if (execCurrentCandle && execCurrentCandle.epoch !== newEpoch) {
+            execCandles.push({ ...execCurrentCandle });
+            if (execCandles.length > 300) execCandles.shift();
           }
-          stCurrentCandle = {
-            open: parseFloat(o.open),
-            high: parseFloat(o.high),
-            low: parseFloat(o.low),
-            close: parseFloat(o.close),
-            epoch: newEpoch
-          };
-          refreshSuperTrend();
+          execCurrentCandle = candle;
         }
       }
       break;
+
     case 'buy':
       handleBuyResponse(data);
       break;
+
     case 'proposal_open_contract':
       if (data.proposal_open_contract) handleContractUpdate(data.proposal_open_contract);
       break;
+
     case 'error':
       log(`API Error: ${data.error.message}`, 'error');
-      isTrading = false;
+      isTrading    = false;
       tradeOpenedAt = null;
-      // autoTrading stays alive — next :58 will retry
       break;
   }
 }
@@ -537,17 +532,15 @@ function handleWsMessage(data) {
 function handleBuyResponse(data) {
   if (data.buy) {
     activeContractId = data.buy.contract_id;
-    lastStake = data.buy.buy_price;
-    // Use purchase_time from the server (epoch seconds) + DURATION
-    contractExpiry = (data.buy.purchase_time || (tradeOpenedAt / 1000)) + CONFIG.DURATION;
+    lastStake        = data.buy.buy_price;
+    contractExpiry   = (data.buy.purchase_time || (tradeOpenedAt / 1000)) + CONFIG.DURATION;
     log(`Trade confirmed | ID: ${activeContractId} | Price: $${lastStake}`, 'success');
     monitorActiveTrade(activeContractId);
     subscribeToContractUpdates(activeContractId);
   } else {
     log(`Trade rejected: ${data.error?.message || 'Unknown'}`, 'error');
-    isTrading = false;
+    isTrading    = false;
     tradeOpenedAt = null;
-    // Keep autoTrading alive so next cycle retries
   }
 }
 
@@ -559,27 +552,26 @@ function handleContractUpdate(contract) {
       activeTradeTimeout = null;
     }
     activeContractId = null;
-    isTrading = false;
-    tradeOpenedAt = null;
-    contractExpiry = null;
+    isTrading        = false;
+    tradeOpenedAt    = null;
+    contractExpiry   = null;
+
     const profit = parseFloat(contract.profit);
     totalProfit += profit;
+
     if (profit < 0) {
       lossStreak++;
-      // Update max loss streak
-      if (lossStreak > maxLossStreak) {
-        maxLossStreak = lossStreak;
-      }
+      if (lossStreak > maxLossStreak) maxLossStreak = lossStreak;
       lossStreakStakes += lastStake;
-      log(`LOSS -$${Math.abs(profit).toFixed(2)} | Streak: ${lossStreak} | Total streak: $${lossStreakStakes.toFixed(2)} | Max streak: ${maxLossStreak}`, 'loss');
+      log(`LOSS -$${Math.abs(profit).toFixed(2)} | Streak: ${lossStreak} | Streak total: $${lossStreakStakes.toFixed(2)} | Max streak: ${maxLossStreak}`, 'loss');
       if (checkStopLoss()) return;
     } else {
-      lossStreak = 0;
-      lossStreakStakes = 0;
+      lossStreak       = 0;
+      lossStreakStakes  = 0;
       log(`WIN +$${profit.toFixed(2)} | Total P&L: $${totalProfit.toFixed(2)}`, 'win');
       if (checkTakeProfit()) return;
     }
-    log('Ready — waiting for next :56/:58 cycle…', 'info');
+    log('Ready — waiting for next 5-min :58 cycle…', 'info');
   }
 }
 
@@ -612,8 +604,9 @@ function initializeWebSocket() {
   clearInterval(pingInterval);
   log('Connecting to Deriv WebSocket…', 'info');
   ws = new WebSocket(`wss://ws.derivws.com/websockets/v3?app_id=${CONFIG.APP_ID}`);
+
   ws.on('open', () => {
-    errorLogged = false;
+    errorLogged     = false;
     reconnectTimeout = null;
     log('WebSocket connected', 'success');
     ws.send(JSON.stringify({ authorize: CONFIG.API_TOKEN, passthrough: { priority: 'high' } }));
@@ -624,6 +617,7 @@ function initializeWebSocket() {
       }
     }, PING_INTERVAL);
   });
+
   ws.on('message', (raw) => {
     lastMessageTime = Date.now();
     try {
@@ -632,6 +626,7 @@ function initializeWebSocket() {
       log(`Parse error: ${e.message}`, 'error');
     }
   });
+
   ws.on('close', () => {
     clearInterval(pingInterval);
     isAuthorized = false;
@@ -641,6 +636,7 @@ function initializeWebSocket() {
     }
     attemptReconnect();
   });
+
   ws.on('error', (err) => {
     if (!errorLogged) {
       log(`WS error: ${err.message || 'Unknown'}`, 'error');
@@ -653,9 +649,9 @@ function initializeWebSocket() {
 // ===========================================================
 // BOOT
 // ===========================================================
-log('🤖 Deriv SuperTrend Bot starting… [3m signal / 2m execution]', 'info');
+log(`🤖 Deriv HMA Bot starting… [10-min HMA signal / 5-min execution]`, 'info');
 log(`Market: ${CONFIG.MARKET} | Mode: ${CONFIG.MODE} | Stake: $${CONFIG.BASE_STAKE}`, 'info');
-log(`ST Period: ${CONFIG.ST_PERIOD} | Multiplier: ${CONFIG.ST_MULTIPLIER} | Signal TF: 3-min | Execution TF: 2-min`, 'info');
+log(`HMA Period: ${CONFIG.HMA_PERIOD} | Signal TF: 10-min | Execution TF: 5-min`, 'info');
 log(`Stop Loss: $${CONFIG.STOP_LOSS} | Take Profit: $${CONFIG.TAKE_PROFIT}`, 'info');
 
 initializeWebSocket();
