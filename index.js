@@ -42,13 +42,13 @@ let lossStreakStakes = 0;
 let activeTradeTimeout = null;
 let tradeOpenedAt = null;                       // timestamp when last trade was placed
 
-// SuperTrend — 5-min candles (execution reference only)
+// SuperTrend — 2-min candles (execution reference only)
 let stCandles = [];
 let stCurrentCandle = null;
 let stLastDirection = 0;
 let stLastValue = null;
 
-// SuperTrend — 10-min candles (signal source)
+// SuperTrend — 4-min candles (signal source)
 let st2Candles = [];
 let st2CurrentCandle = null;
 let st2LastDirection = 0;
@@ -199,7 +199,7 @@ function startSecondChecker() {
     const now = new Date();
     const min = now.getMinutes();
     const sec = now.getSeconds();
-    const onCycleMark = (min % 5 === 4); // minutes 4, 9, 14, 19…
+    const onCycleMark = (min % 2 === 1); // minutes 1, 3, 5, 7…
 
     // Run watchdog every poll
     checkStuckState();
@@ -234,7 +234,7 @@ function onCandleCloseAt56() {
   refreshSuperTrend2min();
   if (!st2LastSignal) return;
   const label = st2LastSignal === 'CALL' ? '▲ RISE' : '▼ FALL';
-  log(`🔒 :56 locked → ${label} | 10m ST Line: ${st2LastValue != null ? st2LastValue.toFixed(4) : '—'}`, 'info');
+  log(`🔒 :56 locked → ${label} | 4m ST Line: ${st2LastValue != null ? st2LastValue.toFixed(4) : '—'}`, 'info');
   // Pre-set direction ready for :58
   if (CONFIG.MODE === 'ST_AUTO' && autoTrading && !isTrading && !activeContractId) {
     currentStrategy = st2LastSignal;
@@ -252,7 +252,7 @@ function onTradeFireAt58(sec) {
   }
   if (CONFIG.MODE === 'ST_AUTO') {
     if (!st2LastSignal) {
-      log('⚡ ST Auto: no 10-min signal locked this cycle — skipping', 'warning');
+      log('⚡ ST Auto: no 4-min signal locked this cycle — skipping', 'warning');
       return;
     }
     currentStrategy = st2LastSignal;
@@ -388,7 +388,7 @@ function subscribeToCandles() {
   stLastDirection = 0;
   stLastValue = null;
 
-  // Reset 15-min state
+  // Reset 2-min state
   st2Candles = [];
   st2CurrentCandle = null;
   st2LastDirection = 0;
@@ -396,27 +396,27 @@ function subscribeToCandles() {
   st2LastSignal = null;
   stLastSignal = null;
 
-  // Subscribe to 5-min candles (trade execution reference)
+  // Subscribe to 2-min candles (trade execution reference)
   ws.send(JSON.stringify({
     ticks_history: CONFIG.MARKET,
-    granularity: 300,
+    granularity: 120,
     style: 'candles',
     count: 150,
     end: 'latest',
     subscribe: 1
   }));
 
-  // Subscribe to 10-min candles (signal source)
+  // Subscribe to 4-min candles (signal source)
   ws.send(JSON.stringify({
     ticks_history: CONFIG.MARKET,
-    granularity: 600,
+    granularity: 240,
     style: 'candles',
     count: 150,
     end: 'latest',
     subscribe: 1
   }));
 
-  log(`Subscribed to ${CONFIG.MARKET} 5-min candles (execution) + 10-min candles (signal)`, 'info');
+  log(`Subscribed to ${CONFIG.MARKET} 2-min candles (execution) + 4-min candles (signal)`, 'info');
 }
 
 function handleCandleHistory(arr, granularity) {
@@ -428,18 +428,18 @@ function handleCandleHistory(arr, granularity) {
     close: parseFloat(c.close),
     epoch: parseInt(c.epoch)
   }));
-  if (granularity === 600) {
-    // 10-min candles — signal source
+  if (granularity === 240) {
+    // 4-min candles — signal source
     st2CurrentCandle = parsed[parsed.length - 1];
     st2Candles = parsed.slice(0, -1);
     refreshSuperTrend2min();
-    log(`Loaded ${st2Candles.length} closed 10-min candles | 10m ST: ${st2LastSignal ?? 'pending'}`, 'success');
+    log(`Loaded ${st2Candles.length} closed 4-min candles | 4m ST: ${st2LastSignal ?? 'pending'}`, 'success');
   } else {
-    // 5-min candles — execution reference
+    // 2-min candles — execution reference
     stCurrentCandle = parsed[parsed.length - 1];
     stCandles = parsed.slice(0, -1);
     refreshSuperTrend();
-    log(`Loaded ${stCandles.length} closed 5-min candles`, 'success');
+    log(`Loaded ${stCandles.length} closed 2-min candles`, 'success');
   }
 }
 
@@ -448,12 +448,12 @@ function handleCandleHistory(arr, granularity) {
 // ===========================================================
 function handleWsMessage(data) {
   if (data.candles && Array.isArray(data.candles)) {
-    const gran = data.echo_req?.granularity ?? 300;
+    const gran = data.echo_req?.granularity ?? 120;
     handleCandleHistory(data.candles, gran);
     return;
   }
   if (data.history?.candles) {
-    const gran = data.echo_req?.granularity ?? 300;
+    const gran = data.echo_req?.granularity ?? 120;
     handleCandleHistory(data.history.candles, gran);
     return;
   }
@@ -470,7 +470,7 @@ function handleWsMessage(data) {
           currentStrategy = CONFIG.MODE;
           log(`Fixed direction: always ${CONFIG.MODE === 'CALL' ? 'RISE' : 'FALL'}`, 'info');
         } else {
-          log('ST Auto active — 10-min signal locks at :56, fires at :58 on 5-min boundary', 'info');
+          log('ST Auto active — 4-min signal locks at :56, fires at :58 on 2-min boundary', 'info');
         }
         if (activeContractId) {
           subscribeToContractUpdates(activeContractId);
@@ -483,10 +483,10 @@ function handleWsMessage(data) {
     case 'ohlc':
       if (data.ohlc) {
         const o = data.ohlc;
-        const gran = parseInt(o.granularity ?? 300);
+        const gran = parseInt(o.granularity ?? 120);
         const newEpoch = parseInt(o.open_time || o.epoch);
-        if (gran === 600) {
-          // 10-min live candle update
+        if (gran === 240) {
+          // 4-min live candle update
           if (st2CurrentCandle && st2CurrentCandle.epoch !== newEpoch) {
             st2Candles.push({ ...st2CurrentCandle });
             if (st2Candles.length > 300) st2Candles.shift();
@@ -500,7 +500,7 @@ function handleWsMessage(data) {
           };
           refreshSuperTrend2min();
         } else {
-          // 5-min live candle update
+          // 2-min live candle update
           if (stCurrentCandle && stCurrentCandle.epoch !== newEpoch) {
             stCandles.push({ ...stCurrentCandle });
             if (stCandles.length > 300) stCandles.shift();
@@ -653,9 +653,9 @@ function initializeWebSocket() {
 // ===========================================================
 // BOOT
 // ===========================================================
-log('🤖 Deriv SuperTrend Bot starting… [10m signal / 5m execution]', 'info');
+log('🤖 Deriv SuperTrend Bot starting… [4m signal / 2m execution]', 'info');
 log(`Market: ${CONFIG.MARKET} | Mode: ${CONFIG.MODE} | Stake: $${CONFIG.BASE_STAKE}`, 'info');
-log(`ST Period: ${CONFIG.ST_PERIOD} | Multiplier: ${CONFIG.ST_MULTIPLIER} | Signal TF: 10-min | Execution TF: 5-min`, 'info');
+log(`ST Period: ${CONFIG.ST_PERIOD} | Multiplier: ${CONFIG.ST_MULTIPLIER} | Signal TF: 4-min | Execution TF: 2-min`, 'info');
 log(`Stop Loss: $${CONFIG.STOP_LOSS} | Take Profit: $${CONFIG.TAKE_PROFIT}`, 'info');
 
 initializeWebSocket();
