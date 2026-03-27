@@ -9,7 +9,7 @@ const CONFIG = {
   BASE_STAKE: 4.5,
   STOP_LOSS: 130000,
   TAKE_PROFIT: 100000,
-  DURATION: 298,                               // contract duration in seconds
+  DURATION: 118,                               // contract duration in seconds
   MARKET: 'R_10',                              // R_10 | R_25 | R_50 | R_75 | R_100
   MODE: 'ST_AUTO',                              // 'ST_AUTO' | 'CALL' | 'PUT'
   ST_PERIOD: 1,
