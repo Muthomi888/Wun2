@@ -5,11 +5,11 @@ const WebSocket = require('ws');
 // CONFIG — edit these before deploying
 // ===========================================================
 const CONFIG = {
-  API_TOKEN: 'XI3UEVkzS7NbtRH',          // ← paste your token here
-  BASE_STAKE: 4.5,
+  API_TOKEN: '8lv1K0qHh9meeLC',          // ← paste your token here
+  BASE_STAKE: 2.5,
   STOP_LOSS: 130000,
   TAKE_PROFIT: 100000,
-  DURATION: 118,                               // contract duration in seconds
+  DURATION: 898,                               // contract duration in seconds
   MARKET: 'R_10',                              // R_10 | R_25 | R_50 | R_75 | R_100
   MODE: 'ST_AUTO',                              // 'ST_AUTO' | 'CALL' | 'PUT'
   ST_PERIOD: 1,
