@@ -48,7 +48,7 @@ let stCurrentCandle = null;
 let stLastDirection = 0;
 let stLastValue = null;
 
-// SuperTrend — 4-min candles (signal source)
+// SuperTrend — 3-min candles (signal source)
 let st2Candles = [];
 let st2CurrentCandle = null;
 let st2LastDirection = 0;
@@ -234,7 +234,7 @@ function onCandleCloseAt56() {
   refreshSuperTrend2min();
   if (!st2LastSignal) return;
   const label = st2LastSignal === 'CALL' ? '▲ RISE' : '▼ FALL';
-  log(`🔒 :56 locked → ${label} | 4m ST Line: ${st2LastValue != null ? st2LastValue.toFixed(4) : '—'}`, 'info');
+  log(`🔒 :56 locked → ${label} | 3m ST Line: ${st2LastValue != null ? st2LastValue.toFixed(4) : '—'}`, 'info');
   // Pre-set direction ready for :58
   if (CONFIG.MODE === 'ST_AUTO' && autoTrading && !isTrading && !activeContractId) {
     currentStrategy = st2LastSignal;
@@ -252,7 +252,7 @@ function onTradeFireAt58(sec) {
   }
   if (CONFIG.MODE === 'ST_AUTO') {
     if (!st2LastSignal) {
-      log('⚡ ST Auto: no 4-min signal locked this cycle — skipping', 'warning');
+      log('⚡ ST Auto: no 3-min signal locked this cycle — skipping', 'warning');
       return;
     }
     currentStrategy = st2LastSignal;
@@ -382,13 +382,13 @@ function subscribeToCandles() {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   ws.send(JSON.stringify({ forget_all: 'candles' }));
 
-  // Reset 5-min state
+  // Reset 2-min execution state
   stCandles = [];
   stCurrentCandle = null;
   stLastDirection = 0;
   stLastValue = null;
 
-  // Reset 2-min state
+  // Reset 3-min signal state
   st2Candles = [];
   st2CurrentCandle = null;
   st2LastDirection = 0;
@@ -406,17 +406,17 @@ function subscribeToCandles() {
     subscribe: 1
   }));
 
-  // Subscribe to 4-min candles (signal source)
+  // Subscribe to 3-min candles (signal source — closest to 4-min Deriv supports)
   ws.send(JSON.stringify({
     ticks_history: CONFIG.MARKET,
-    granularity: 240,
+    granularity: 180,
     style: 'candles',
     count: 150,
     end: 'latest',
     subscribe: 1
   }));
 
-  log(`Subscribed to ${CONFIG.MARKET} 2-min candles (execution) + 4-min candles (signal)`, 'info');
+  log(`Subscribed to ${CONFIG.MARKET} 2-min candles (execution) + 3-min candles (signal)`, 'info');
 }
 
 function handleCandleHistory(arr, granularity) {
@@ -428,12 +428,12 @@ function handleCandleHistory(arr, granularity) {
     close: parseFloat(c.close),
     epoch: parseInt(c.epoch)
   }));
-  if (granularity === 240) {
-    // 4-min candles — signal source
+  if (granularity === 180) {
+    // 3-min candles — signal source
     st2CurrentCandle = parsed[parsed.length - 1];
     st2Candles = parsed.slice(0, -1);
     refreshSuperTrend2min();
-    log(`Loaded ${st2Candles.length} closed 4-min candles | 4m ST: ${st2LastSignal ?? 'pending'}`, 'success');
+    log(`Loaded ${st2Candles.length} closed 3-min candles | 3m ST: ${st2LastSignal ?? 'pending'}`, 'success');
   } else {
     // 2-min candles — execution reference
     stCurrentCandle = parsed[parsed.length - 1];
@@ -470,7 +470,7 @@ function handleWsMessage(data) {
           currentStrategy = CONFIG.MODE;
           log(`Fixed direction: always ${CONFIG.MODE === 'CALL' ? 'RISE' : 'FALL'}`, 'info');
         } else {
-          log('ST Auto active — 4-min signal locks at :56, fires at :58 on 2-min boundary', 'info');
+          log('ST Auto active — 3-min signal locks at :56, fires at :58 on 2-min boundary', 'info');
         }
         if (activeContractId) {
           subscribeToContractUpdates(activeContractId);
@@ -485,8 +485,8 @@ function handleWsMessage(data) {
         const o = data.ohlc;
         const gran = parseInt(o.granularity ?? 120);
         const newEpoch = parseInt(o.open_time || o.epoch);
-        if (gran === 240) {
-          // 4-min live candle update
+        if (gran === 180) {
+          // 3-min live candle update
           if (st2CurrentCandle && st2CurrentCandle.epoch !== newEpoch) {
             st2Candles.push({ ...st2CurrentCandle });
             if (st2Candles.length > 300) st2Candles.shift();
@@ -653,9 +653,9 @@ function initializeWebSocket() {
 // ===========================================================
 // BOOT
 // ===========================================================
-log('🤖 Deriv SuperTrend Bot starting… [4m signal / 2m execution]', 'info');
+log('🤖 Deriv SuperTrend Bot starting… [3m signal / 2m execution]', 'info');
 log(`Market: ${CONFIG.MARKET} | Mode: ${CONFIG.MODE} | Stake: $${CONFIG.BASE_STAKE}`, 'info');
-log(`ST Period: ${CONFIG.ST_PERIOD} | Multiplier: ${CONFIG.ST_MULTIPLIER} | Signal TF: 4-min | Execution TF: 2-min`, 'info');
+log(`ST Period: ${CONFIG.ST_PERIOD} | Multiplier: ${CONFIG.ST_MULTIPLIER} | Signal TF: 3-min | Execution TF: 2-min`, 'info');
 log(`Stop Loss: $${CONFIG.STOP_LOSS} | Take Profit: $${CONFIG.TAKE_PROFIT}`, 'info');
 
 initializeWebSocket();
