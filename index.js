@@ -6,13 +6,13 @@ const WebSocket = require('ws');
 // ===========================================================
 const CONFIG = {
   API_TOKEN:    'XI3UEVkzS7NbtRH',  // ← paste your token here
-  BASE_STAKE:   4.5,
+  BASE_STAKE:   5.5,
   STOP_LOSS:    130000,
   TAKE_PROFIT:  100000,
-  DURATION:     118,                 // contract duration in seconds
+  DURATION:     298,                 // contract duration in seconds
   MARKET:       'R_10',             // R_10 | R_25 | R_50 | R_75 | R_100
   MODE:         'HMA_AUTO',         // 'HMA_AUTO' | 'CALL' | 'PUT'
-  HMA_PERIOD:   20,                 // Hull MA period (applied to 10-min candles)
+  HMA_PERIOD:   9,                 // Hull MA period (applied to 10-min candles)
   APP_ID:       1089,
 };
 
